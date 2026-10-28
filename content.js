@@ -26,6 +26,8 @@
   let titleEl = null;
   let currentCode = "";
   let currentAiCode = "";
+  let previewEl = null;
+  let previewFrameEl = null;
 
   /* ---------- Section picker ---------- */
   function pickSection(el) {
@@ -102,7 +104,16 @@
   }
 
   /* ---------- Exact Style Clone (real computed styles, no AI / no API) ---------- */
-  let exactMode = true; // true = pixel widths (exact), false = responsive-friendly
+  // exactMode = true  -> one viewport, pixel widths (same look at this window size)
+  // exactMode = false -> responsive: flexible widths + @media rules captured from tablet/mobile widths
+  let exactMode = false;
+
+  // Widths the page copy is rendered at to learn the tablet / mobile layout.
+  // "capture" = iframe width used for measuring, "max" = max-width of the generated @media rule.
+  const BREAKPOINTS = [
+    { name: "tablet", capture: 768, max: 991 },
+    { name: "mobile", capture: 390, max: 767 }
+  ];
 
   const INHERITED = new Set([
     "color", "font-family", "font-size", "font-style", "font-weight", "line-height",
@@ -111,6 +122,8 @@
     "visibility", "text-shadow"
   ]);
   const ROOT_KEEP = new Set(["color", "font-family", "font-size", "font-weight", "line-height"]);
+  // animation-driven values (scroll reveal etc.) must not become @media rules
+  const NO_DIFF = new Set(["opacity", "transform", "transform-origin"]);
 
   const PROPS = [
     "display", "position", "top", "right", "bottom", "left", "z-index", "float", "clear",
@@ -142,6 +155,9 @@
   const DROP = new Set(["script", "style", "noscript", "link", "meta", "template"]);
   const SVG_NS = "http://www.w3.org/2000/svg";
 
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const gcs = (el, ps) => el.ownerDocument.defaultView.getComputedStyle(el, ps || null);
+
   function shorten4(v) {
     const t = v[0], r = v[1], b = v[2], l = v[3];
     if (t === r && r === b && b === l) return t;
@@ -163,106 +179,154 @@
     return w + " " + st + " " + get("border-" + s + "-color");
   }
 
+  function contentWidth(cs) {
+    let w = parseFloat(cs.getPropertyValue("width")) || 0;
+    if (cs.getPropertyValue("box-sizing") === "border-box") {
+      ["padding-left", "padding-right", "border-left-width", "border-right-width"].forEach((p) => {
+        w -= parseFloat(cs.getPropertyValue(p)) || 0;
+      });
+    }
+    return w;
+  }
+
+  // Fixed px grid tracks that fill their container -> fr units (so the grid stays fluid)
+  function fluidColumns(v, cs) {
+    if (exactMode || !v || v === "none") return v;
+    const t = v.split(/\s+/);
+    if (!t.every((x) => /^[\d.]+px$/.test(x))) return v;
+    const px = t.map(parseFloat);
+    const gap = parseFloat(cs.getPropertyValue("column-gap")) || 0;
+    const total = px.reduce((a, b) => a + b, 0) + gap * (px.length - 1);
+    if (Math.abs(total - contentWidth(cs)) > 2) return v;
+    if (px.every((x) => Math.abs(x - px[0]) < 0.5)) return "repeat(" + px.length + ", minmax(0, 1fr))";
+    return px.map((x) => "minmax(0, " + Math.round(x * 100) / 100 + "fr)").join(" ");
+  }
+
   function collectSvg(cs, parentCs) {
     const L = [];
     SVG_PROPS.forEach((p) => {
       const v = cs.getPropertyValue(p);
       if (!v) return;
-      if (p === "opacity") { if (v !== "1") L.push(p + ": " + v + ";"); return; }
-      if (!parentCs || v !== parentCs.getPropertyValue(p)) L.push(p + ": " + v + ";");
+      if (p === "opacity") { if (v !== "1") L.push([p, v]); return; }
+      if (!parentCs || v !== parentCs.getPropertyValue(p)) L.push([p, v]);
     });
     return L;
   }
 
-  // Collects declarations for one element (or pseudo-element)
+  // Returns [[prop, value], ...]. full=true keeps every value (used to compare viewports).
   function collect(cs, parentCs, def, o) {
     const L = [];
+    const add = (p, v) => L.push([p, v]);
     const val = (p) => cs.getPropertyValue(p);
+    const full = !!o.full;
 
     PROPS.forEach((p) => {
-      const v = val(p);
+      let v = val(p);
       if (!v) return;
-      if (INHERITED.has(p)) {
-        if (o.isRoot) {
-          if (v === def[p] && !ROOT_KEEP.has(p)) return;
-        } else if (parentCs && v === parentCs.getPropertyValue(p)) {
+      if (p === "grid-template-columns") v = fluidColumns(v, cs);
+      if (!full) {
+        if (INHERITED.has(p)) {
+          if (o.isRoot) { if (v === def[p] && !ROOT_KEEP.has(p)) return; }
+          else if (parentCs && v === parentCs.getPropertyValue(p)) return;
+        } else if (v === def[p]) {
           return;
         }
-      } else if (v === def[p]) {
-        return;
       }
-      L.push(p + ": " + v + ";");
+      add(p, v);
     });
 
-    // transform-origin only matters when a transform exists
-    if (val("transform") !== "none") L.push("transform-origin: " + val("transform-origin") + ";");
+    if (!full && val("transform") !== "none") add("transform-origin", val("transform-origin"));
 
     // overflow
     const ox = val("overflow-x"), oy = val("overflow-y");
-    if (ox !== def["overflow-x"] || oy !== def["overflow-y"]) {
-      if (ox === oy) L.push("overflow: " + ox + ";");
-      else L.push("overflow-x: " + ox + ";", "overflow-y: " + oy + ";");
+    if (full) { add("overflow-x", ox); add("overflow-y", oy); }
+    else if (ox !== def["overflow-x"] || oy !== def["overflow-y"]) {
+      if (ox === oy) add("overflow", ox);
+      else { add("overflow-x", ox); add("overflow-y", oy); }
     }
 
     // gap
     const rg = val("row-gap"), cg = val("column-gap");
-    if (rg !== def["row-gap"] || cg !== def["column-gap"]) {
-      L.push("gap: " + (rg === cg ? rg : rg + " " + cg) + ";");
+    if (full) { add("row-gap", rg); add("column-gap", cg); }
+    else if (rg !== def["row-gap"] || cg !== def["column-gap"]) {
+      add("gap", rg === cg ? rg : rg + " " + cg);
     }
 
     // margin / padding
     ["margin", "padding"].forEach((prop) => {
       const v = SIDES.map((s) => val(prop + "-" + s));
       const d = SIDES.map((s) => def[prop + "-" + s]);
-      if (v.some((x, i) => x !== d[i])) L.push(prop + ": " + shorten4(v) + ";");
+      if (full || v.some((x, i) => x !== d[i])) add(prop, shorten4(v));
     });
 
     // border
     const act = SIDES.map((s) => borderSide(val, s));
     const dfl = SIDES.map((s) => borderSide((p) => def[p], s));
-    if (act.some((x, i) => x !== dfl[i])) {
-      if (act.every((x) => x === act[0])) L.push("border: " + act[0] + ";");
-      else SIDES.forEach((s, i) => { if (act[i] !== dfl[i]) L.push("border-" + s + ": " + act[i] + ";"); });
+    if (full) {
+      SIDES.forEach((s, i) => add("border-" + s, act[i]));
+    } else if (act.some((x, i) => x !== dfl[i])) {
+      if (act.every((x) => x === act[0])) add("border", act[0]);
+      else SIDES.forEach((s, i) => { if (act[i] !== dfl[i]) add("border-" + s, act[i]); });
     }
 
     // border radius
     const rv = CORNERS.map((c) => val("border-" + c + "-radius"));
     const rd = CORNERS.map((c) => def["border-" + c + "-radius"]);
-    if (rv.some((x, i) => x !== rd[i])) {
+    if (full) {
+      CORNERS.forEach((c, i) => add("border-" + c + "-radius", rv[i]));
+    } else if (rv.some((x, i) => x !== rd[i])) {
       if (rv.some((x) => x.indexOf(" ") > -1)) {
-        CORNERS.forEach((c, i) => { if (rv[i] !== rd[i]) L.push("border-" + c + "-radius: " + rv[i] + ";"); });
+        CORNERS.forEach((c, i) => { if (rv[i] !== rd[i]) add("border-" + c + "-radius", rv[i]); });
       } else {
-        L.push("border-radius: " + shorten4(rv) + ";");
+        add("border-radius", shorten4(rv));
       }
     }
 
     // size
     const disp = val("display");
     const w = val("width"), h = val("height");
+    const mw = val("max-width"), mh = val("max-height");
     const real = (v) => v && v !== "auto" && v !== "none";
+    let wV = null, hV = null, minH = null, mwV = null, mhV = null;
     if (REPLACED.has(o.tag)) {
-      if (real(w)) L.push("width: " + w + ";");
-      if (real(h)) L.push("height: " + h + ";");
+      if (real(w)) wV = w;
+      if (real(h)) hV = h;
+      if (!exactMode && (o.tag === "img" || o.tag === "video")) {
+        if (!real(mw)) mwV = "100%";
+        if (val("object-fit") === "fill") hV = null; // keep the image ratio when it shrinks
+      }
     } else if (disp !== "inline" && disp !== "contents") {
-      const full = exactMode || o.isPseudo || o.leaf;
+      const spread = exactMode || o.isPseudo || o.leaf;
       const abs = val("position") === "absolute" || val("position") === "fixed";
       const hasBg = val("background-image") !== "none";
       if (o.isRoot && !exactMode) {
-        L.push("width: 100%;");
-        if (real(w)) L.push("max-width: " + w + ";");
-      } else if (full || abs) {
-        if (real(w)) L.push("width: " + w + ";");
-        if (o.isRoot) L.push("max-width: 100%;");
+        wV = "100%";
+        if (real(w)) mwV = w;
+      } else if (spread || abs) {
+        if (real(w)) wV = w;
+        if (o.isRoot) mwV = "100%";
       }
-      if ((full || o.isRoot || hasBg) && real(h) && parseFloat(h) > 0) L.push("min-height: " + h + ";");
+      if ((spread || o.isRoot || hasBg) && real(h) && parseFloat(h) > 0) minH = h;
     }
-    const mw = val("max-width");
-    if (!o.isRoot && real(mw)) L.push("max-width: " + mw + ";");
-    const mh = val("max-height");
-    if (real(mh)) L.push("max-height: " + mh + ";");
+    if (!o.isRoot && real(mw)) mwV = mw;
+    if (real(mh)) mhV = mh;
+
+    if (full) {
+      add("width", wV || "auto"); add("height", hV || "auto"); add("min-height", minH || "0px");
+      add("max-width", mwV || "none"); add("max-height", mhV || "none");
+    } else {
+      if (wV) add("width", wV);
+      if (hV) add("height", hV);
+      if (minH) add("min-height", minH);
+      if (mwV) add("max-width", mwV);
+      if (mhV) add("max-height", mhV);
+    }
 
     return L;
   }
+
+  const fmtPairs = (pairs) => pairs.map((p) => p[0] + ": " + p[1] + ";").join("\n");
+  const pairsToMap = (pairs) => new Map(pairs);
 
   function absUrl(v) {
     if (!v || /^(#|data:|javascript:|mailto:|tel:|blob:)/i.test(v)) return v;
@@ -321,69 +385,185 @@
     return { imports: Array.from(imports), faces: Array.from(faces) };
   }
 
-  function buildClone(rootEl, exact) {
-    exactMode = exact;
-    const token = Math.random().toString(36).slice(2, 6);
-
-    // Hidden iframe = clean browser defaults (unaffected by the page's CSS resets)
+  /* ----- clean browser defaults (hidden iframe, unaffected by the page's CSS resets) ----- */
+  function makeDefaults() {
     const frame = document.createElement("iframe");
     frame.style.cssText = "position:fixed;left:-9999px;top:0;width:200px;height:200px;border:0;visibility:hidden;pointer-events:none;";
     document.documentElement.appendChild(frame);
     const fdoc = frame.contentDocument;
     if (fdoc && !fdoc.body) fdoc.documentElement.appendChild(fdoc.createElement("body"));
-    const defCache = new Map();
-    function getDef(tag) {
-      if (defCache.has(tag)) return defCache.get(tag);
-      const d0 = tag === "svg" ? fdoc.createElementNS(SVG_NS, "svg") : fdoc.createElement(tag);
-      fdoc.body.appendChild(d0);
-      const d = readAll(fdoc.defaultView.getComputedStyle(d0));
-      d0.remove();
-      defCache.set(tag, d);
-      return d;
+    const cache = new Map();
+    return {
+      getDef(tag) {
+        if (cache.has(tag)) return cache.get(tag);
+        const d0 = tag === "svg" ? fdoc.createElementNS(SVG_NS, "svg") : fdoc.createElement(tag);
+        fdoc.body.appendChild(d0);
+        const d = readAll(fdoc.defaultView.getComputedStyle(d0));
+        d0.remove();
+        cache.set(tag, d);
+        return d;
+      },
+      dispose() { frame.remove(); }
+    };
+  }
+
+  /* ----- multi-width capture: load a hidden copy of the page, resize it, read the styles ----- */
+  function pathOf(el) {
+    const p = [];
+    let n = el;
+    while (n && n !== document.documentElement) {
+      const par = n.parentNode;
+      p.unshift(Array.prototype.indexOf.call(par.childNodes, n));
+      n = par;
     }
+    return p;
+  }
+
+  // Map: path-key -> Map(prop -> value) for every element of the subtree
+  function snapshotTree(peerRoot, getDef) {
+    const out = new Map();
+    (function rec(el, key, parentCs, isRoot) {
+      const tag = el.tagName.toLowerCase();
+      const cs = gcs(el);
+      const leaf = !el.firstElementChild && !(el.textContent || "").trim();
+      out.set(key, pairsToMap(collect(cs, parentCs, getDef(tag), { isRoot: isRoot, tag: tag, leaf: leaf, isPseudo: false, full: true })));
+      if (tag === "svg") return;
+      Array.from(el.childNodes).forEach((c, i) => {
+        if (c.nodeType !== 1) return;
+        if (DROP.has(c.tagName.toLowerCase())) return;
+        rec(c, key + "." + i, cs, false);
+      });
+    })(peerRoot, "r", peerRoot.parentElement ? gcs(peerRoot.parentElement) : null, true);
+    return out;
+  }
+
+  async function captureLayouts(rootEl, getDef, onStatus) {
+    const W0 = window.innerWidth;
+    const bps = BREAKPOINTS.filter((b) => b.capture < W0);
+    const res = { bps: bps, base: null, snaps: [], note: "" };
+    if (!bps.length) {
+      res.note = "Browser window is only " + W0 + "px wide, so tablet/mobile layouts could not be captured. Widen the window and clone again.";
+      return res;
+    }
+    const path = pathOf(rootEl);
+    const f = document.createElement("iframe");
+    f.setAttribute("sandbox", "allow-same-origin allow-scripts"); // no top navigation, no popups
+    f.style.cssText = "position:fixed;left:-99999px;top:0;width:" + W0 + "px;height:" + window.innerHeight +
+      "px;border:0;visibility:hidden;pointer-events:none;";
+    f.src = location.href;
+    onStatus && onStatus("Loading page copy...");
+    document.documentElement.appendChild(f);
+    try {
+      await new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error("page copy took too long to load")), 25000);
+        f.addEventListener("load", () => { clearTimeout(t); resolve(); }, { once: true });
+      });
+      await sleep(1500); // let the page's own scripts finish rendering
+      const doc = f.contentDocument;
+      if (!doc || !doc.documentElement) throw new Error("this page does not allow being loaded in a frame");
+      let n = doc.documentElement;
+      for (let i = 0; i < path.length; i++) {
+        n = n.childNodes[path[i]];
+        if (!n) throw new Error("selected section was not found in the page copy");
+      }
+      if (n.nodeType !== 1 || n.tagName !== rootEl.tagName) throw new Error("selected section does not match in the page copy");
+
+      onStatus && onStatus("Reading desktop...");
+      res.base = snapshotTree(n, getDef);
+      for (let i = 0; i < bps.length; i++) {
+        onStatus && onStatus("Reading " + bps[i].name + "...");
+        f.style.width = bps[i].capture + "px";
+        void f.offsetWidth;
+        await sleep(400);
+        res.snaps.push(snapshotTree(n, getDef));
+      }
+    } finally {
+      f.remove();
+    }
+    return res;
+  }
+
+  // Declarations that change between two consecutive layouts, per breakpoint
+  function mediaDiffs(key, cap) {
+    const res = [];
+    const pk = key === "r" ? null : key.slice(0, key.lastIndexOf("."));
+    cap.bps.forEach((b, j) => {
+      const prevS = j === 0 ? cap.base : cap.snaps[j - 1];
+      const curS = cap.snaps[j];
+      const a = prevS.get(key), c = curS.get(key);
+      if (!a || !c) { res.push(""); return; }
+      const ap = pk ? prevS.get(pk) : null, cp = pk ? curS.get(pk) : null;
+      const out = [];
+      c.forEach((v, p) => {
+        if (NO_DIFF.has(p) || a.get(p) === v) return;
+        // value inherited both before and after -> the parent's own rule already covers it
+        if (INHERITED.has(p) && ap && cp && v === cp.get(p) && a.get(p) === ap.get(p)) return;
+        out.push([p, v]);
+      });
+      res.push(fmtPairs(out));
+    });
+    return res;
+  }
+
+  function visibleAnywhere(key, cap) {
+    const sets = [cap.base].concat(cap.snaps);
+    return sets.some((s) => { const m = s && s.get(key); return m && m.get("display") !== "none"; });
+  }
+
+  function buildClone(rootEl, exact, cap, defs) {
+    exactMode = exact;
+    const token = Math.random().toString(36).slice(2, 6);
+    const getDef = defs.getDef;
+    const hasBps = cap && cap.bps && cap.bps.length && cap.base;
 
     const rules = new Map();
     const families = new Set();
     let n = 0;
-    function classFor(decls, pseudo) {
-      const key = (pseudo || "") + "|" + decls;
+    function classFor(decls, pseudo, media) {
+      const key = (pseudo || "") + "|" + decls + "|" + (media || []).join("|");
       let r = rules.get(key);
-      if (!r) { r = { cls: "c-" + token + "-" + ++n, pseudo: pseudo || "", decls: decls }; rules.set(key, r); }
+      if (!r) { r = { cls: "c-" + token + "-" + ++n, pseudo: pseudo || "", decls: decls, media: media || [] }; rules.set(key, r); }
       return r.cls;
     }
 
-    function walk(orig, clone, parentCs, isRoot, inSvg) {
+    function walk(orig, clone, parentCs, isRoot, inSvg, key) {
       const tag = orig.tagName.toLowerCase();
-      const cs = getComputedStyle(orig);
+      const cs = gcs(orig);
       const isSvgRoot = tag === "svg" && !inSvg;
       const svgish = inSvg || isSvgRoot;
-      if (!svgish && !isRoot && cs.display === "none") return false;
+      if (!svgish && !isRoot && cs.display === "none") {
+        // hidden here, but maybe visible at another width (e.g. a mobile-only menu)
+        if (!(hasBps && visibleAnywhere(key, cap))) return false;
+      }
 
       cleanAttrs(orig, clone, svgish);
       const classes = [];
 
-      let decls;
+      let pairs;
+      let media = [];
       if (inSvg) {
-        decls = collectSvg(cs, parentCs);
+        pairs = collectSvg(cs, parentCs);
       } else {
         const leaf = !orig.firstElementChild && !(orig.textContent || "").trim();
-        decls = collect(cs, parentCs, getDef(tag), { isRoot: isRoot, tag: tag, leaf: leaf, isPseudo: false });
-        if (isSvgRoot) decls = decls.concat(collectSvg(cs, parentCs));
+        pairs = collect(cs, parentCs, getDef(tag), { isRoot: isRoot, tag: tag, leaf: leaf, isPseudo: false });
+        if (isSvgRoot) pairs = pairs.concat(collectSvg(cs, parentCs));
+        if (hasBps) media = mediaDiffs(key, cap);
         cs.getPropertyValue("font-family").split(",").forEach((f) => {
           const name = f.replace(/["']/g, "").trim();
           if (name) families.add(name);
         });
       }
-      if (decls.length) classes.push(classFor(decls.join("\n"), ""));
+      const anyMedia = media.some((m) => m);
+      if (pairs.length || anyMedia) classes.push(classFor(fmtPairs(pairs), "", anyMedia ? media : []));
 
       if (!svgish) {
         ["::before", "::after"].forEach((ps) => {
-          const pcs = getComputedStyle(orig, ps);
+          const pcs = gcs(orig, ps);
           const content = pcs.getPropertyValue("content");
           if (!content || content === "none" || content === "normal" || pcs.getPropertyValue("display") === "none") return;
-          const pd = collect(pcs, cs, getDef("span"), { isRoot: false, tag: "span", leaf: true, isPseudo: true });
-          pd.unshift("content: " + content + ";");
-          classes.push(classFor(pd.join("\n"), ps));
+          const pp = collect(pcs, cs, getDef("span"), { isRoot: false, tag: "span", leaf: true, isPseudo: true });
+          pp.unshift(["content", content]);
+          classes.push(classFor(fmtPairs(pp), ps, []));
         });
       }
 
@@ -397,49 +577,109 @@
         if (o.nodeType !== 1) return;
         const t = o.tagName.toLowerCase();
         if (DROP.has(t) || (t === "source" && tag === "picture")) { clone.removeChild(c); return; }
-        if (!walk(o, c, cs, false, svgish)) clone.removeChild(c);
+        if (!walk(o, c, cs, false, svgish, key + "." + i)) clone.removeChild(c);
       });
       return true;
     }
 
-    let html, cssBody = "", fontInfo = { imports: [], faces: [] };
-    try {
-      const clone = rootEl.cloneNode(true);
-      clone.classList.remove(HOVER, LOCKED);
-      const parentCs = rootEl.parentElement ? getComputedStyle(rootEl.parentElement) : null;
-      walk(rootEl, clone, parentCs, true, false);
-      html = fmt(clone, 0).trimEnd();
-      rules.forEach((r) => {
-        cssBody += "." + r.cls + r.pseudo + " {\n" + r.decls.split("\n").map((l) => "  " + l).join("\n") + "\n}\n";
+    const clone = rootEl.cloneNode(true);
+    clone.classList.remove(HOVER, LOCKED);
+    const parentCs = rootEl.parentElement ? gcs(rootEl.parentElement) : null;
+    walk(rootEl, clone, parentCs, true, false, "r");
+    const html = fmt(clone, 0).trimEnd();
+
+    const ruleText = (sel, decls, pad) =>
+      pad + sel + " {\n" + decls.split("\n").map((l) => pad + "  " + l).join("\n") + "\n" + pad + "}\n";
+
+    let cssBody = "";
+    rules.forEach((r) => { if (r.decls) cssBody += ruleText("." + r.cls + r.pseudo, r.decls, ""); });
+    if (hasBps) {
+      cap.bps.forEach((b, j) => {
+        let inner = "";
+        rules.forEach((r) => { if (r.media[j]) inner += ruleText("." + r.cls, r.media[j], "  "); });
+        if (inner) cssBody += "\n/* " + b.name + " */\n@media (max-width: " + b.max + "px) {\n" + inner + "}\n";
       });
-      fontInfo = collectFontCss(families);
-    } finally {
-      frame.remove();
     }
 
-    let css = "/* Cloned from " + location.href + " | mode: " + (exact ? "Exact px" : "Responsive") +
-      " | viewport: " + window.innerWidth + "px */\n";
+    const fontInfo = collectFontCss(families);
+    let css = "/* Cloned from " + location.href + " | " + (exact ? "Exact px" : "Responsive") +
+      " | desktop width: " + window.innerWidth + "px */\n";
+    if (hasBps) css += "/* Breakpoints: " + cap.bps.map((b) => b.name + " <= " + b.max + "px").join(", ") + " */\n";
+    if (cap && cap.note) css += "/* NOTE: " + cap.note + " */\n";
     css += "/* Fonts used: " + Array.from(families).join(", ") + " */\n";
     fontInfo.imports.forEach((u) => (css += '@import url("' + u + '");\n'));
-    fontInfo.faces.forEach((f) => (css += f + "\n"));
+    fontInfo.faces.forEach((fc) => (css += fc + "\n"));
     css += "\n" + cssBody;
 
     return "<style>\n" + css + "</style>\n\n" + html;
   }
 
-  // Removes the inspector's own highlight classes while reading styles (they override colors with !important)
-  function generateExactClone(el, exact) {
+  // Highlight classes from this inspector override colors with !important, so they are
+  // removed while styles are read and restored right after.
+  function withoutHighlights(fn) {
     const marked = Array.from(document.querySelectorAll("." + HOVER + ", ." + LOCKED)).map((nd) => [
       nd, nd.classList.contains(HOVER), nd.classList.contains(LOCKED)
     ]);
     marked.forEach((m) => m[0].classList.remove(HOVER, LOCKED));
     try {
-      return buildClone(el, exact);
+      return fn();
     } finally {
       marked.forEach((m) => {
         if (m[1]) m[0].classList.add(HOVER);
         if (m[2]) m[0].classList.add(LOCKED);
       });
+    }
+  }
+
+  async function generateExactClone(el, exact, onStatus) {
+    exactMode = exact;
+    const defs = makeDefaults();
+    try {
+      let cap = { bps: [], base: null, snaps: [], note: "" };
+      if (!exact) {
+        try {
+          cap = await captureLayouts(el, defs.getDef, onStatus);
+        } catch (err) {
+          cap = { bps: [], base: null, snaps: [], note: "Responsive capture failed (" + err.message + "). Only the current layout was cloned, with flexible widths." };
+        }
+      }
+      onStatus && onStatus("Building code...");
+      await sleep(20);
+      return withoutHighlights(() => buildClone(el, exact, cap, defs));
+    } finally {
+      defs.dispose();
+    }
+  }
+
+  function pageHtml(code) {
+    let bg = "#ffffff";
+    try {
+      const b = getComputedStyle(document.body).backgroundColor;
+      const h = getComputedStyle(document.documentElement).backgroundColor;
+      const clear = (c) => !c || c === "rgba(0, 0, 0, 0)" || c === "transparent";
+      bg = !clear(b) ? b : !clear(h) ? h : "#ffffff";
+    } catch (e) {}
+    return '<!doctype html><html><head><meta charset="utf-8">' +
+      '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      "<style>html,body{margin:0;padding:0;background:" + bg + ";}</style></head><body>" + code + "</body></html>";
+  }
+
+  function copyText(text, ok, fail) {
+    const legacy = () => {
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;opacity:0;";
+      document.body.appendChild(ta);
+      ta.select();
+      let good = false;
+      try { good = document.execCommand("copy"); } catch (e) {}
+      ta.remove();
+      good ? ok() : fail();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(ok).catch(legacy);
+    } else {
+      legacy();
     }
   }
 
@@ -499,18 +739,52 @@
         .pill .hint { color: #9ca3af; }
         #off { background: #ef4444; color: #fff; padding: 4px 10px; border-radius: 999px; }
         #off:hover { background: #dc2626; }
+        #preview { background: #0ea5e9; color: #fff; }
+        #preview:hover { background: #0284c7; }
+        .preview {
+          display: none; position: fixed; inset: 3vh 3vw; z-index: 5;
+          background: #fff; border: 1px solid #e5e7eb; border-radius: 12px;
+          box-shadow: 0 20px 60px rgba(0,0,0,.4); flex-direction: column; overflow: hidden;
+          font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; font-size: 13px; color: #1f2937;
+        }
+        .pv-bar {
+          display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+          padding: 10px 12px; background: #f9fafb; border-bottom: 1px solid #e5e7eb;
+        }
+        .pv-bar b { margin-right: 6px; }
+        .dev.active { background: #8B5CF6; color: #fff; }
+        #pvRange { width: 180px; }
+        #pvLabel { margin-left: auto; color: #6b7280; font-size: 12px; margin-right: 6px; }
+        .pv-stage { flex: 1; overflow: auto; background: #d1d5db; padding: 12px; }
+        .pv-wrap { margin: 0 auto; background: #fff; box-shadow: 0 2px 14px rgba(0,0,0,.2); overflow: hidden; }
+        .pv-wrap iframe { border: 0; display: block; background: #fff; transform-origin: top left; }
       </style>
       <div class="box" id="box">
         <div class="header">
           <span class="title" id="title"></span>
           <button id="up" title="Select parent">▲ Parent</button>
           <button id="down" title="Select child">▼ Child</button>
-          <button id="mode" title="Exact: pixel widths (same look). Responsive: flexible widths.">Mode: Exact</button>
+          <button id="mode" title="Responsive: flexible widths + tablet/mobile @media rules. Exact: pixel widths at this window size.">Mode: Responsive</button>
           <button id="aiclone" title="Copy HTML + CSS with exact colors, fonts and layout">Exact Clone</button>
+          <button id="preview" title="Open live preview (desktop / tablet / mobile)">Preview</button>
           <button id="copy" title="Copy raw HTML code">Copy Code</button>
           <button id="close" title="Close">✕</button>
         </div>
         <pre id="code"></pre>
+      </div>
+      <div class="preview" id="previewPanel">
+        <div class="pv-bar">
+          <b>Live Preview</b>
+          <button class="dev" data-w="desktop">Desktop</button>
+          <button class="dev" data-w="768">Tablet 768</button>
+          <button class="dev" data-w="390">Mobile 390</button>
+          <input type="range" id="pvRange" min="320" max="1920" step="1" />
+          <span id="pvLabel"></span>
+          <button id="pvClose">&#10005; Close</button>
+        </div>
+        <div class="pv-stage" id="pvStage">
+          <div class="pv-wrap" id="pvWrap"><iframe id="pvFrame" sandbox=""></iframe></div>
+        </div>
       </div>
       <div class="pill">
         <span class="dot"></span>
@@ -539,32 +813,110 @@
       }
     });
 
+    /* ----- clone (async: loads a hidden copy of the page to read tablet/mobile layouts) ----- */
+    let busy = false;
+    let lastVW = window.innerWidth;
+
+    async function runClone(copy) {
+      if (!locked || busy) return false;
+      busy = true;
+      const target = locked;
+      aiCloneBtn.textContent = "Working...";
+      lastVW = window.innerWidth;
+      let code;
+      try {
+        code = await generateExactClone(target, exactMode, (s) => { aiCloneBtn.textContent = s; });
+      } catch (err) {
+        code = "/* Clone failed: " + err.message + " */";
+      }
+      busy = false;
+      aiCloneBtn.textContent = "Exact Clone";
+      if (locked !== target) return false;
+      currentAiCode = code;
+      codeEl.textContent = code;
+      codeEl.scrollTop = 0;
+      if (copy) doCopyClone();
+      return true;
+    }
+
+    function doCopyClone() {
+      codeEl.textContent = currentAiCode;
+      copyText(
+        currentAiCode,
+        () => {
+          aiCloneBtn.textContent = "Cloned & Copied!";
+          setTimeout(() => (aiCloneBtn.textContent = "Exact Clone"), 1500);
+        },
+        () => {
+          aiCloneBtn.textContent = "Done - click again to copy";
+          setTimeout(() => (aiCloneBtn.textContent = "Exact Clone"), 2500);
+        }
+      );
+    }
+
     modeBtn.addEventListener("click", () => {
       exactMode = !exactMode;
       modeBtn.textContent = exactMode ? "Mode: Exact" : "Mode: Responsive";
+      currentAiCode = ""; // regenerate with the new mode
     });
 
     aiCloneBtn.addEventListener("click", () => {
-      if (!locked) return;
-      aiCloneBtn.textContent = "Generating...";
-      setTimeout(() => {
-        try {
-          currentAiCode = generateExactClone(locked, exactMode);
-        } catch (err) {
-          currentAiCode = "/* Clone failed: " + err.message + " */";
-        }
-        codeEl.textContent = currentAiCode;
-        codeEl.scrollTop = 0;
-        const done = () => {
-          aiCloneBtn.textContent = "Cloned & Copied!";
-          setTimeout(() => (aiCloneBtn.textContent = "Exact Clone"), 1500);
-        };
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(currentAiCode).then(done).catch(() => fallbackCopy(currentAiCode, done));
-        } else {
-          fallbackCopy(currentAiCode, done);
-        }
-      }, 30);
+      if (!locked || busy) return;
+      if (currentAiCode) doCopyClone(); // already generated: copy instantly
+      else runClone(true);
+    });
+
+    /* ----- live preview ----- */
+    previewEl = root.getElementById("previewPanel");
+    previewFrameEl = root.getElementById("pvFrame");
+    const pvStage = root.getElementById("pvStage");
+    const pvWrap = root.getElementById("pvWrap");
+    const pvRange = root.getElementById("pvRange");
+    const pvLabel = root.getElementById("pvLabel");
+    const devBtns = Array.from(root.querySelectorAll(".dev"));
+    let previewW = 390;
+
+    function layoutPreview() {
+      const availW = Math.max(100, pvStage.clientWidth - 24);
+      const availH = Math.max(100, pvStage.clientHeight - 24);
+      const s = Math.min(1, availW / previewW);
+      pvWrap.style.width = Math.round(previewW * s) + "px";
+      pvWrap.style.height = availH + "px";
+      previewFrameEl.style.width = previewW + "px";
+      previewFrameEl.style.height = Math.round(availH / s) + "px";
+      previewFrameEl.style.transform = "scale(" + s + ")";
+      pvLabel.textContent = previewW + "px" + (s < 1 ? " (shown at " + Math.round(s * 100) + "%)" : "");
+      devBtns.forEach((b) => {
+        const w = b.dataset.w === "desktop" ? lastVW : Number(b.dataset.w);
+        b.classList.toggle("active", w === previewW);
+      });
+    }
+
+    function setPreviewWidth(w) {
+      previewW = Math.max(280, Math.round(w));
+      pvRange.max = String(Math.max(1920, lastVW));
+      pvRange.value = String(previewW);
+      layoutPreview();
+    }
+
+    devBtns.forEach((b) => b.addEventListener("click", () => {
+      setPreviewWidth(b.dataset.w === "desktop" ? lastVW : Number(b.dataset.w));
+    }));
+    pvRange.addEventListener("input", () => setPreviewWidth(Number(pvRange.value)));
+    root.getElementById("pvClose").addEventListener("click", hidePreview);
+    window.addEventListener("resize", () => {
+      if (previewEl && previewEl.style.display === "flex") layoutPreview();
+    });
+
+    root.getElementById("preview").addEventListener("click", async () => {
+      if (!locked || busy) return;
+      if (!currentAiCode) {
+        const ok = await runClone(false);
+        if (!ok) return;
+      }
+      previewEl.style.display = "flex";
+      previewFrameEl.srcdoc = pageHtml(currentAiCode);
+      setPreviewWidth(lastVW);
     });
 
     root.getElementById("close").addEventListener("click", closeBox);
@@ -618,7 +970,13 @@
     codeEl.scrollTop = 0;
   }
 
+  function hidePreview() {
+    if (previewEl) previewEl.style.display = "none";
+    if (previewFrameEl) previewFrameEl.srcdoc = "";
+  }
+
   function closeBox() {
+    hidePreview();
     if (locked) locked.classList.remove(LOCKED);
     locked = null;
     stack = [];
@@ -700,7 +1058,9 @@
   }
 
   function onKey(e) {
-    if (e.key === "Escape" && locked) closeBox();
+    if (e.key !== "Escape") return;
+    if (previewEl && previewEl.style.display === "flex") hidePreview();
+    else if (locked) closeBox();
   }
 
   /* ---------- Enable / Disable ---------- */
@@ -729,6 +1089,8 @@
     closeBox();
     if (host) host.remove();
     host = null;
+    previewEl = null;
+    previewFrameEl = null;
   }
 
   function apply(enabled) {
