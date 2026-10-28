@@ -1,0 +1,12 @@
+.sci-hover-outline {
+  outline: 2px dashed #10B981 !important;
+  outline-offset: -2px !important;
+  background-color: rgba(16, 185, 129, 0.08) !important;
+  cursor: crosshair !important;
+}
+.sci-locked-outline {
+  outline: 2px solid #2563EB !important;
+  outline-offset: -2px !important;
+  background-color: rgba(37, 99, 235, 0.08) !important;
+  cursor: crosshair !important;
+}
