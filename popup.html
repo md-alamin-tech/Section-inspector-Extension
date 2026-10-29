@@ -3,45 +3,84 @@
 <head>
   <meta charset="UTF-8" />
   <style>
+    @font-face { font-family: "Poppins"; font-weight: 400; src: url("fonts/Poppins-Regular.woff2") format("woff2"); }
+    @font-face { font-family: "Poppins"; font-weight: 500; src: url("fonts/Poppins-Medium.woff2") format("woff2"); }
+    @font-face { font-family: "Poppins"; font-weight: 600; src: url("fonts/Poppins-SemiBold.woff2") format("woff2"); }
+    @font-face { font-family: "Poppins"; font-weight: 700; src: url("fonts/Poppins-Bold.woff2") format("woff2"); }
+
+    :root {
+      --green: #05552F;
+      --green-deep: #043D23;
+      --cream: #FFF8E7;
+      --cream-dark: #EFE6CC;
+      --muted: #4b6b5a;
+    }
+    * { box-sizing: border-box; }
     body {
       margin: 0;
-      width: 260px;
-      padding: 16px;
-      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      color: #111827;
-      background: #fff;
+      width: 310px;
+      padding: 18px;
+      font-family: "Poppins", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      color: var(--green-deep);
+      background: var(--cream);
     }
-    h1 { font-size: 14px; margin: 0 0 12px; }
-    .row { display: flex; align-items: center; justify-content: space-between; }
+    .brand { display: flex; align-items: center; gap: 12px; }
+    .brand img { height: 44px; width: auto; display: block; }
+    .brand h1 { font-size: 20px; font-weight: 700; margin: 0; color: var(--green); letter-spacing: -.3px; line-height: 1.1; }
+    .brand small { display: block; font-size: 10.5px; font-weight: 500; color: var(--muted); margin-top: 2px; letter-spacing: .2px; }
+    .desc { margin: 12px 0 14px; font-size: 12px; line-height: 1.55; color: var(--muted); }
+
+    .card {
+      background: var(--green);
+      color: var(--cream);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex; align-items: center; justify-content: space-between;
+    }
     .label { font-size: 13px; font-weight: 500; }
-    .switch { position: relative; width: 44px; height: 24px; }
+    #status { font-weight: 700; }
+
+    .switch { position: relative; width: 46px; height: 26px; flex: none; }
     .switch input { opacity: 0; width: 0; height: 0; }
     .slider {
       position: absolute; inset: 0; cursor: pointer;
-      background: #d1d5db; border-radius: 24px; transition: .2s;
+      background: rgba(255, 248, 231, .28); border-radius: 26px; transition: .2s;
     }
     .slider::before {
-      content: ""; position: absolute; height: 18px; width: 18px;
-      left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: .2s;
+      content: ""; position: absolute; height: 20px; width: 20px;
+      left: 3px; top: 3px; background: var(--cream); border-radius: 50%; transition: .2s;
     }
-    input:checked + .slider { background: #10B981; }
-    input:checked + .slider::before { transform: translateX(20px); }
-    .hint { margin-top: 12px; font-size: 12px; color: #6b7280; line-height: 1.5; }
-    #status { font-weight: 600; }
+    input:checked + .slider { background: #7DD3A0; }
+    input:checked + .slider::before { transform: translateX(20px); background: var(--green-deep); }
+    input:focus-visible + .slider { outline: 2px solid var(--cream); outline-offset: 2px; }
+
+    .hint { margin-top: 14px; font-size: 11.5px; color: var(--muted); line-height: 1.65; }
+    .hint b { color: var(--green); font-weight: 600; }
+    .foot { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(5,85,47,.15); font-size: 10.5px; color: #7a8f82; display: flex; justify-content: space-between; }
   </style>
 </head>
 <body>
-  <h1>Section Code Inspector</h1>
-  <div class="row">
+  <div class="brand">
+    <img src="assets/logo-mark-green.png" alt="SectionLift" />
+    <div>
+      <h1>SectionLift</h1>
+      <small>Lift any section. Ship it.</small>
+    </div>
+  </div>
+  <p class="desc">Hover over any website, pick a section and copy it as clean, responsive HTML, CSS &amp; JS.</p>
+
+  <div class="card">
     <span class="label">Status: <span id="status">OFF</span></span>
     <label class="switch">
       <input type="checkbox" id="toggle" />
       <span class="slider"></span>
     </label>
   </div>
+
   <div class="hint">
-    ON korle hover kore pura <b>section</b> highlight hobe. <b>Click</b> korle code box ashbe, <b>Copy Code</b> chapo. Chhoto element lagle <b>Alt+Click</b>. Box bondho korte <b>✕ Close</b> ba <b>Esc</b>.
+    ON korle hover kore pura <b>section</b> highlight hobe. <b>Click</b> korle code box ashbe, <b>Exact Clone</b> chapo (HTML + CSS + JS copy hobe). Chhoto element lagle <b>Alt+Click</b>. Box bondho korte <b>✕</b> ba <b>Esc</b>.
   </div>
+  <div class="foot"><span>SectionLift</span><span>v1.3</span></div>
   <script src="popup.js"></script>
 </body>
 </html>
